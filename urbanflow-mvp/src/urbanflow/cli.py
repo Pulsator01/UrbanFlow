@@ -54,26 +54,83 @@ def _default_objective() -> Dict[str, Any]:
     }
 
 
-def _create_sample_gtfs_zip(dst_zip: Path) -> None:
+def _create_sample_gtfs_zip(dst_zip: Path, sample_type: str = "basic") -> None:
     # Minimal 2-stop, 1-route, 1-trip, 2-stop_times sample feed
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr(
-            "stops.txt",
-            "stop_id,stop_name,stop_lat,stop_lon\nS1,Stop 1,0.0,0.0\nS2,Stop 2,0.0,0.1\n",
-        )
-        z.writestr(
-            "routes.txt",
-            "route_id,route_short_name,route_long_name,route_type\nR1,1,Route 1,3\n",
-        )
-        z.writestr(
-            "trips.txt",
-            "trip_id,route_id,service_id,trip_headsign,shape_id\nT1,R1,WEEK,To Stop 2,\n",
-        )
-        z.writestr(
-            "stop_times.txt",
-            "trip_id,arrival_time,departure_time,stop_sequence,stop_id\nT1,00:00:00,00:00:00,1,S1\nT1,00:10:00,00:10:00,2,S2\n",
-        )
+        if sample_type == "basic":
+            z.writestr(
+                "stops.txt",
+                "stop_id,stop_name,stop_lat,stop_lon\nS1,Stop 1,0.0,0.0\nS2,Stop 2,0.0,0.1\n",
+            )
+            z.writestr(
+                "routes.txt",
+                "route_id,route_short_name,route_long_name,route_type\nR1,1,Route 1,3\n",
+            )
+            z.writestr(
+                "trips.txt",
+                "trip_id,route_id,service_id,trip_headsign,shape_id\nT1,R1,WEEK,To Stop 2,\n",
+            )
+            z.writestr(
+                "stop_times.txt",
+                "trip_id,arrival_time,departure_time,stop_sequence,stop_id\nT1,00:00:00,00:00:00,1,S1\nT1,00:10:00,00:10:00,2,S2\n",
+            )
+        elif sample_type == "complex":
+            # 6 stops including a spur SX designed to be pruned by local search
+            z.writestr(
+                "stops.txt",
+                "\n".join([
+                    "stop_id,stop_name,stop_lat,stop_lon",
+                    "S1,Stop 1,0.000,0.000",
+                    "S2,Stop 2,0.000,0.050",
+                    "S3,Stop 3,0.000,0.100",
+                    "S4,Stop 4,0.000,0.150",
+                    "S5,Stop 5,0.000,0.200",
+                    "SX,Spur X,0.010,0.000"
+                ]) + "\n",
+            )
+            z.writestr(
+                "routes.txt",
+                "\n".join([
+                    "route_id,route_short_name,route_long_name,route_type",
+                    "R1,1,Main Eastbound,3",
+                    "R2,2,Main Westbound,3",
+                    "R3,3,Spur,3"
+                ]) + "\n",
+            )
+            z.writestr(
+                "trips.txt",
+                "\n".join([
+                    "trip_id,route_id,service_id,trip_headsign,shape_id",
+                    "T1,R1,WEEK,EB,",
+                    "T2,R2,WEEK,WB,",
+                    "T3,R3,WEEK,Spur,",
+                ]) + "\n",
+            )
+            # Stop times:
+            # T1: S1->S2 08m, S2->S3 12m, S3->S4 14m, S4->S5 16m
+            # T2: S5->S4 10m, S4->S3 12m, S3->S2 14m, S2->S1 16m
+            # T3: SX->S1 40m (heavy spur edge, degree-1 node SX)
+            z.writestr(
+                "stop_times.txt",
+                "\n".join([
+                    "trip_id,arrival_time,departure_time,stop_sequence,stop_id",
+                    "T1,00:00:00,00:00:00,1,S1",
+                    "T1,00:08:00,00:08:00,2,S2",
+                    "T1,00:20:00,00:20:00,3,S3",
+                    "T1,00:34:00,00:34:00,4,S4",
+                    "T1,00:50:00,00:50:00,5,S5",
+                    "T2,01:00:00,01:00:00,1,S5",
+                    "T2,01:10:00,01:10:00,2,S4",
+                    "T2,01:22:00,01:22:00,3,S3",
+                    "T2,01:36:00,01:36:00,4,S2",
+                    "T2,01:52:00,01:52:00,5,S1",
+                    "T3,02:00:00,02:00:00,1,SX",
+                    "T3,02:40:00,02:40:00,2,S1",
+                ]) + "\n",
+            )
+        else:
+            raise ValueError(f"Unknown sample_type: {sample_type}")
     dst_zip.parent.mkdir(parents=True, exist_ok=True)
     with dst_zip.open("wb") as f:
         f.write(mem.getvalue())
@@ -184,7 +241,7 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         # Prepare GTFS
         if args.use_sample:
             gtfs_zip = td_path / "sample_gtfs.zip"
-            _create_sample_gtfs_zip(gtfs_zip)
+            _create_sample_gtfs_zip(gtfs_zip, sample_type=args.sample_type or "basic")
         else:
             if not args.gtfs:
                 raise SystemExit("Either provide --gtfs or use --use-sample")
@@ -265,7 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_pipe = sub.add_parser("pipeline", help="One-shot pipeline: validate + run + KPI deltas")
     p_pipe.add_argument("--gtfs", help="Path to GTFS zip (omit if using --use-sample)")
-    p_pipe.add_argument("--use-sample", action="store_true", help="Generate a minimal sample GTFS and run")
+    p_pipe.add_argument("--use-sample", action="store_true", help="Generate a sample GTFS and run")
+    p_pipe.add_argument("--sample-type", choices=["basic", "complex"], help="Sample GTFS type when using --use-sample")
     p_pipe.add_argument("--constraints", help="Path to constraints JSON (defaults will be generated if omitted)")
     p_pipe.add_argument("--objective", help="Path to objective JSON (defaults will be generated if omitted)")
     p_pipe.add_argument("--outdir", required=True, help="Output directory")
