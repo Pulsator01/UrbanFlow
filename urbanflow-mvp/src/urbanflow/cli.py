@@ -4,6 +4,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
+import tempfile
+import zipfile
+import io
 
 from .gtfs.parser import read_gtfs_zip
 from .gtfs.validator import validate_feed
@@ -24,6 +27,56 @@ def _ensure_outdir(outdir: Path) -> None:
 def _load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _default_constraints() -> Dict[str, Any]:
+    return {
+        "fleet_size": 40,
+        "depots": [{"id": "D1", "lat": 0.0, "lon": 0.0}],
+        "max_interline": 2,
+        "max_vehicle_km_per_day": 400,
+        "vehicle_capacity": 70,
+    }
+
+
+def _default_objective() -> Dict[str, Any]:
+    return {
+        "weights": {
+            "p90_travel_time": 0.5,
+            "passenger_weighted_travel_time": 0.3,
+            "coverage_within_400m": 0.2,
+        },
+        "coverage_radius_m": 400,
+    }
+
+
+def _create_sample_gtfs_zip(dst_zip: Path) -> None:
+    # Minimal 2-stop, 1-route, 1-trip, 2-stop_times sample feed
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr(
+            "stops.txt",
+            "stop_id,stop_name,stop_lat,stop_lon\nS1,Stop 1,0.0,0.0\nS2,Stop 2,0.0,0.1\n",
+        )
+        z.writestr(
+            "routes.txt",
+            "route_id,route_short_name,route_long_name,route_type\nR1,1,Route 1,3\n",
+        )
+        z.writestr(
+            "trips.txt",
+            "trip_id,route_id,service_id,trip_headsign,shape_id\nT1,R1,WEEK,To Stop 2,\n",
+        )
+        z.writestr(
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_sequence,stop_id\nT1,00:00:00,00:00:00,1,S1\nT1,00:10:00,00:10:00,2,S2\n",
+        )
+    dst_zip.parent.mkdir(parents=True, exist_ok=True)
+    with dst_zip.open("wb") as f:
+        f.write(mem.getvalue())
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -121,6 +174,63 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     print(f"Run completed. Outputs in: {outdir}")
 
+def cmd_pipeline(args: argparse.Namespace) -> None:
+    # One-shot pipeline: optionally create sample GTFS and default configs, run, and print KPI deltas
+    outdir = Path(args.outdir)
+    _ensure_outdir(outdir)
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        # Prepare GTFS
+        if args.use_sample:
+            gtfs_zip = td_path / "sample_gtfs.zip"
+            _create_sample_gtfs_zip(gtfs_zip)
+        else:
+            if not args.gtfs:
+                raise SystemExit("Either provide --gtfs or use --use-sample")
+            gtfs_zip = Path(args.gtfs)
+
+        # Prepare constraints/objective
+        constraints_path = Path(args.constraints) if args.constraints else (td_path / "constraints.json")
+        objective_path = Path(args.objective) if args.objective else (td_path / "objective.json")
+        if not args.constraints:
+            _write_json(constraints_path, _default_constraints())
+        if not args.objective:
+            _write_json(objective_path, _default_objective())
+
+        # Validate
+        report_path = outdir / "validation_report.json"
+        feed = read_gtfs_zip(gtfs_zip)
+        report = validate_feed(feed)
+        _write_json(report_path, report)
+
+        # Run
+        run_ns = argparse.Namespace(
+            gtfs=str(gtfs_zip),
+            constraints=str(constraints_path),
+            objective=str(objective_path),
+            outdir=str(outdir),
+            sample_size=str(args.sample_size),
+            seed=str(args.seed) if args.seed is not None else None,
+            max_iters=str(args.max_iters),
+        )
+        cmd_run(run_ns)
+
+        # Print KPI deltas
+        kpi_file = outdir / "kpi_report.json"
+        if kpi_file.exists():
+            kpi = _load_json(kpi_file)
+            b = kpi.get("baseline", {})
+            o = kpi.get("optimized", {})
+            def delta(key: str) -> float:
+                return float(o.get(key, 0) - b.get(key, 0))
+            print("KPI deltas (optimized - baseline):")
+            keys = ["average_travel_time", "passenger_weighted_travel_time", "p50_travel_time", "p90_travel_time", "on_time_percentage", "coverage_ratio"]
+            for k in keys:
+                print(f" - {k}: {delta(k):.2f}")
+        else:
+            print("kpi_report.json not found; pipeline completed without KPI summary.")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="urbanflow", description="UrbanFlow CLI")
@@ -152,6 +262,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--seed", default=None, help="Random seed")
     p_run.add_argument("--max_iters", default="500", help="Max iterations for local search")
     p_run.set_defaults(func=cmd_run)
+
+    p_pipe = sub.add_parser("pipeline", help="One-shot pipeline: validate + run + KPI deltas")
+    p_pipe.add_argument("--gtfs", help="Path to GTFS zip (omit if using --use-sample)")
+    p_pipe.add_argument("--use-sample", action="store_true", help="Generate a minimal sample GTFS and run")
+    p_pipe.add_argument("--constraints", help="Path to constraints JSON (defaults will be generated if omitted)")
+    p_pipe.add_argument("--objective", help="Path to objective JSON (defaults will be generated if omitted)")
+    p_pipe.add_argument("--outdir", required=True, help="Output directory")
+    p_pipe.add_argument("--sample-size", default="1000", help="Sampling size for evaluator")
+    p_pipe.add_argument("--seed", default="42", help="Random seed")
+    p_pipe.add_argument("--max_iters", default="200", help="Max iterations for local search")
+    p_pipe.set_defaults(func=cmd_pipeline)
 
     return parser
 

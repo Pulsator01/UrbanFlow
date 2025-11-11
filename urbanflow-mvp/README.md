@@ -8,6 +8,7 @@ UrbanFlow is a minimal, development-ready MVP that ingests a GTFS static feed, v
   - `urbanflow validate --gtfs feed.zip --out validation_report.json`
   - `urbanflow synth_avl --gtfs feed.zip --out synthetic_avl.csv --params synth.json`
   - `urbanflow visualize --before ./output/baseline.json --after ./output/optimized.json --out map.html`
+  - `urbanflow pipeline --use-sample --outdir ./output_pipeline` (one-shot run with sample GTFS and defaults)
 - Optional FastAPI endpoints for demo: `POST /api/v1/optimize`, `GET /api/v1/status/{job_id}`
 
 ### Quickstart
@@ -18,6 +19,8 @@ UrbanFlow is a minimal, development-ready MVP that ingests a GTFS static feed, v
    - `urbanflow validate --gtfs path/to/feed.zip --out ./output/validation_report.json`
 4. End-to-end run:
    - `urbanflow run --gtfs path/to/feed.zip --constraints constraints.json --objective objective.json --outdir ./output --sample-size 5000 --seed 42`
+5. One-shot pipeline (auto sample + defaults):
+   - `urbanflow pipeline --use-sample --outdir ./output_pipeline`
 
 ### Repository Layout
 ```
